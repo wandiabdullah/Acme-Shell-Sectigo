@@ -7,15 +7,18 @@ Shell-based automation script to request and manage SSL certificates using the *
 
 ---
 
-## 🚀 Features
+## ✨ Features
 
-- ✅ Request SSL certificates from Sectigo CAAS using Certbot
-- 📁 Custom working directory for each tenant (`SECTIGO_DIR`)
-- 🔍 Auto-detect PHP-FPM or other PHP handlers in VirtualHost
-- 🔧 Automatically update Nginx/Apache configurations
-- 🧼 Minimal, no-icon, clean shell environment
-
----
+- Supports **Sectigo CAAS DV** endpoint: `https://acme.sectigo.com/v2/DV`
+- Fully automated certificate request using `certbot` with **EAB credentials**
+- Automatic support for:
+  - **Nginx**
+  - **Apache** (`mod_php` or `PHP-FPM`)
+- Auto-generated VirtualHost configuration for:
+  - Port **80** (HTTP + ACME challenge)
+  - Port **443** (HTTPS with SSL path)
+- Detects installed **PHP version** and configuration
+- Supports **multi-tenant** setup via custom `SECTIGO_DIR`
 
 ## 📁 File Structure
 
