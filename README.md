@@ -1,6 +1,3 @@
-# Acme-Shell-Sectigo
-Shell for custom path file SSL and Actiovation CAAS
-
 # Acme Shell Sectigo
 
 > 🛠️ Initial Release – Version 0.1  
