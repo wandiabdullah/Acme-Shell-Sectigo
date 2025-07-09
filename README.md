@@ -1,6 +1,6 @@
 # Acme Shell Sectigo
 
-> 🛠️ Initial Release – Version 0.1  
+> 🛠️ Initial Release – Version 0.1.4  
 > 🐚 Script: `acme-caas-sectigo.sh`
 
 Shell-based automation script to request and manage SSL certificates using the **ACME protocol** with **Sectigo CAAS**. It supports multi-tenant configuration, custom working directories, and PHP handler detection for seamless integration into existing web server environments.
