@@ -2,7 +2,7 @@
 
 # === INTRODUCTION ===
 echo "=============================================="
-echo "          Sectigo CAAS ACME SSL Setup         "
+echo "         Sectigo CAAS ACME SSL Setup          "
 echo "=============================================="
 echo ""
 echo "This script will issue an SSL certificate using:"
@@ -14,14 +14,16 @@ read -p "Enter your EAB KID                        : " EAB_KID
 read -p "Enter your EAB HMAC key                   : " EAB_HMAC
 read -p "Enter your domain name                    : " DOMAIN
 read -p "Enter your email address                  : " EMAIL
+read -p "Enter certificate name (cert-name) [default: $DOMAIN]: " CERT_NAME
 read -p "Enter webroot path [default: /var/www/$DOMAIN]: " WEBROOT
 read -p "Enter Sectigo working directory [default: /opt/sectigo]: " SECTIGO_DIR
 
 # === DEFAULT VALUES ===
 [ -z "$WEBROOT" ] && WEBROOT="/var/www/$DOMAIN"
 [ -z "$SECTIGO_DIR" ] && SECTIGO_DIR="/opt/sectigo"
+[ -z "$CERT_NAME" ] && CERT_NAME="$DOMAIN"
 
-# === CREATE WORKING DIRS ===
+# === CREATE DIRECTORIES ===
 DOMAIN_DIR="$SECTIGO_DIR/$DOMAIN"
 CONFIG_DIR="$DOMAIN_DIR/config"
 WORK_DIR="$DOMAIN_DIR/work"
@@ -31,9 +33,9 @@ CERT_DIR="$CONFIG_DIR/live/$DOMAIN"
 echo "Creating working directories in $DOMAIN_DIR ..."
 mkdir -p "$CONFIG_DIR" "$WORK_DIR" "$LOGS_DIR" "$WEBROOT"
 
-# === MARK TENANT INFO ===
+# === OPTIONAL INFO METADATA ===
 if [ "$SECTIGO_DIR" != "/opt/sectigo" ]; then
-  sudo mkdir -p "/opt/sectigo/$DOMAIN"
+  mkdir -p "/opt/sectigo/$DOMAIN"
   echo "SECTIGO_DIR=$SECTIGO_DIR" > "/opt/sectigo/$DOMAIN/info.txt"
   echo "Created at: $(date)" >> "/opt/sectigo/$DOMAIN/info.txt"
 fi
@@ -52,24 +54,6 @@ if [ -n "$PHP_VERSION" ]; then
   fi
 fi
 
-# === REQUEST CERTIFICATE ===
-echo "Requesting SSL certificate for $DOMAIN ..."
-certbot certonly \
-  --server https://acme.sectigo.com/v2/DV \
-  --eab-kid "$EAB_KID" \
-  --eab-hmac-key "$EAB_HMAC" \
-  --email "$EMAIL" --agree-tos --non-interactive \
-  --webroot -w "$WEBROOT" \
-  -d "$DOMAIN" \
-  --config-dir "$CONFIG_DIR" \
-  --work-dir "$WORK_DIR" \
-  --logs-dir "$LOGS_DIR"
-
-if [ $? -ne 0 ]; then
-  echo "Certificate issuance failed."
-  exit 1
-fi
-
 # === DETECT WEB SERVER ===
 if systemctl is-active --quiet apache2; then
   WEB_SERVER="apache"
@@ -80,10 +64,9 @@ else
   exit 1
 fi
 
-# === CONFIGURE NGINX ===
+# === CREATE VHOST PORT 80 BEFORE CERTBOT ===
 if [ "$WEB_SERVER" = "nginx" ]; then
   NGINX_CONF="/etc/nginx/sites-available/$DOMAIN.conf"
-
   cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
@@ -99,31 +82,59 @@ server {
     location / {
         try_files \$uri \$uri/ =404;
     }
-
-    location ~ \.php\$ {
+}
 EOF
 
-  if [ "$ENABLE_PHP" = true ]; then
-    if [ -n "$PHP_FPM_SOCK" ]; then
-      echo "        include snippets/fastcgi-php.conf;" >> "$NGINX_CONF"
-      echo "        fastcgi_pass unix:$PHP_FPM_SOCK;" >> "$NGINX_CONF"
-    else
-      echo "        include snippets/fastcgi-php.conf;" >> "$NGINX_CONF"
-      echo "        fastcgi_pass $PHP_FPM_PORT;" >> "$NGINX_CONF"
-    fi
-  else
-    echo "        return 500;" >> "$NGINX_CONF"
-  fi
+  ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/$DOMAIN.conf"
+  nginx -t && systemctl reload nginx
 
+elif [ "$WEB_SERVER" = "apache" ]; then
+  APACHE_CONF="/etc/apache2/sites-available/$DOMAIN.conf"
+  cat > "$APACHE_CONF" <<EOF
+<VirtualHost *:80>
+    ServerName $DOMAIN
+    DocumentRoot $WEBROOT
+
+    <Directory $WEBROOT>
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    ErrorLog \${APACHE_LOG_DIR}/$DOMAIN-error.log
+    CustomLog \${APACHE_LOG_DIR}/$DOMAIN-access.log combined
+</VirtualHost>
+EOF
+
+  a2ensite "$DOMAIN.conf"
+  apache2ctl configtest && systemctl reload apache2
+fi
+
+# === REQUEST CERTIFICATE ===
+echo "Requesting SSL certificate for $DOMAIN ..."
+certbot certonly \
+  -v \
+  --server https://acme.sectigo.com/v2/DV \
+  --eab-kid "$EAB_KID" \
+  --eab-hmac-key "$EAB_HMAC" \
+  --email "$EMAIL" \
+  --agree-tos \
+  --non-interactive \
+  --webroot -w "$WEBROOT" \
+  -d "$DOMAIN" \
+  --debug-challenges \
+  --cert-name "$CERT_NAME" \
+  --config-dir "$CONFIG_DIR" \
+  --work-dir "$WORK_DIR" \
+  --logs-dir "$LOGS_DIR"
+
+if [ $? -ne 0 ]; then
+  echo "Certificate issuance failed."
+  exit 1
+fi
+
+# === APPEND VHOST PORT 443 ===
+if [ "$WEB_SERVER" = "nginx" ]; then
   cat >> "$NGINX_CONF" <<EOF
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        include fastcgi_params;
-    }
-
-    location ~ /\.ht {
-        deny all;
-    }
-}
 
 server {
     listen 443 ssl;
@@ -165,87 +176,41 @@ EOF
 }
 EOF
 
-  ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/$DOMAIN.conf"
   nginx -t && systemctl reload nginx
 
-# === CONFIGURE APACHE ===
 elif [ "$WEB_SERVER" = "apache" ]; then
-  APACHE_CONF="/etc/apache2/sites-available/$DOMAIN.conf"
-
-  if apache2ctl -M | grep -q php; then
-    cat > "$APACHE_CONF" <<EOF
-<VirtualHost *:80>
-    ServerName $DOMAIN
-    DocumentRoot $WEBROOT
-
-    <Directory $WEBROOT>
-        AllowOverride All
-        Require all granted
-    </Directory>
-
-    ErrorLog \${APACHE_LOG_DIR}/$DOMAIN-error.log
-    CustomLog \${APACHE_LOG_DIR}/$DOMAIN-access.log combined
-</VirtualHost>
+  cat >> "$APACHE_CONF" <<EOF
 
 <VirtualHost *:443>
     ServerName $DOMAIN
     DocumentRoot $WEBROOT
 
     SSLEngine on
-    SSLCertificateFile      $CERT_DIR/fullchain.pem
-    SSLCertificateKeyFile   $CERT_DIR/privkey.pem
+    SSLCertificateFile    $CERT_DIR/fullchain.pem
+    SSLCertificateKeyFile $CERT_DIR/privkey.pem
 
     <Directory $WEBROOT>
         AllowOverride All
         Require all granted
     </Directory>
-
-    ErrorLog \${APACHE_LOG_DIR}/$DOMAIN-ssl-error.log
-    CustomLog \${APACHE_LOG_DIR}/$DOMAIN-ssl-access.log combined
-</VirtualHost>
 EOF
 
-  else
-    cat > "$APACHE_CONF" <<EOF
-<VirtualHost *:80>
-    ServerName $DOMAIN
-    DocumentRoot $WEBROOT
-
-    <Directory $WEBROOT>
-        AllowOverride All
-        Require all granted
-    </Directory>
-
-    ErrorLog \${APACHE_LOG_DIR}/$DOMAIN-error.log
-    CustomLog \${APACHE_LOG_DIR}/$DOMAIN-access.log combined
-</VirtualHost>
-
-<VirtualHost *:443>
-    ServerName $DOMAIN
-    DocumentRoot $WEBROOT
-
-    SSLEngine on
-    SSLCertificateFile      $CERT_DIR/fullchain.pem
-    SSLCertificateKeyFile   $CERT_DIR/privkey.pem
-
-    <Directory $WEBROOT>
-        AllowOverride All
-        Require all granted
-    </Directory>
-
+  if [ "$ENABLE_PHP" = true ] && [ -n "$PHP_FPM_SOCK" ]; then
+    cat >> "$APACHE_CONF" <<EOF
     <FilesMatch \.php$>
         SetHandler "proxy:unix:$PHP_FPM_SOCK|fcgi://localhost/"
     </FilesMatch>
+EOF
+  fi
 
+  cat >> "$APACHE_CONF" <<EOF
     ErrorLog \${APACHE_LOG_DIR}/$DOMAIN-ssl-error.log
     CustomLog \${APACHE_LOG_DIR}/$DOMAIN-ssl-access.log combined
 </VirtualHost>
 EOF
-  fi
 
-  a2ensite "$DOMAIN.conf"
   apache2ctl configtest && systemctl reload apache2
 fi
 
 # === DONE ===
-echo "SSL certificate installed and virtual host configured for $DOMAIN"
+echo "SSL certificate installed and web server configured for $DOMAIN"
