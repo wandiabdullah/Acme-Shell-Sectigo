@@ -18,6 +18,33 @@ read -p "Enter certificate name (cert-name) [default: $DOMAIN]: " CERT_NAME
 read -p "Enter webroot path [default: /var/www/$DOMAIN]: " WEBROOT
 read -p "Enter Sectigo working directory [default: /opt/sectigo]: " SECTIGO_DIR
 
+# === CHECK FOR WILDCARD DOMAIN ===
+IS_WILDCARD=false
+if [[ "$DOMAIN" == \** ]]; then
+  IS_WILDCARD=true
+  echo "Wildcard domain detected. DNS validation will be used."
+  read -p "Choose DNS validation method (manual/cloudflare): " DNS_METHOD
+  while [[ "$DNS_METHOD" != "manual" && "$DNS_METHOD" != "cloudflare" ]]; do
+    echo "Invalid choice. Please enter 'manual' or 'cloudflare'."
+    read -p "Choose DNS validation method (manual/cloudflare): " DNS_METHOD
+  done
+  if [ "$DNS_METHOD" = "cloudflare" ]; then
+    # Check if certbot-dns-cloudflare plugin is available
+    if ! certbot plugins 2>/dev/null | grep -q "dns-cloudflare"; then
+      echo "Error: certbot-dns-cloudflare plugin is not installed."
+      echo "Please install it using: sudo apt install python3-certbot-dns-cloudflare (on Ubuntu/Debian)"
+      echo "Or: pip install certbot-dns-cloudflare"
+      exit 1
+    fi
+    read -s -p "Enter your Cloudflare API token: " CF_API_TOKEN
+    echo ""  # Newline after hidden input
+    # Create Cloudflare credentials file
+    CF_CRED_FILE="$CONFIG_DIR/cloudflare.ini"
+    echo "dns_cloudflare_api_token = $CF_API_TOKEN" > "$CF_CRED_FILE"
+    chmod 600 "$CF_CRED_FILE"
+  fi
+fi
+
 # === DEFAULT VALUES ===
 [ -z "$WEBROOT" ] && WEBROOT="/var/www/$DOMAIN"
 [ -z "$SECTIGO_DIR" ] && SECTIGO_DIR="/opt/sectigo"
@@ -28,7 +55,7 @@ DOMAIN_DIR="$SECTIGO_DIR/$DOMAIN"
 CONFIG_DIR="$DOMAIN_DIR/config"
 WORK_DIR="$DOMAIN_DIR/work"
 LOGS_DIR="$DOMAIN_DIR/logs"
-CERT_DIR="$CONFIG_DIR/live/$DOMAIN"
+CERT_DIR="$CONFIG_DIR/live/$CERT_NAME"
 
 echo "Creating working directories in $DOMAIN_DIR ..."
 mkdir -p "$CONFIG_DIR" "$WORK_DIR" "$LOGS_DIR" "$WEBROOT"
@@ -111,21 +138,59 @@ fi
 
 # === REQUEST CERTIFICATE ===
 echo "Requesting SSL certificate for $DOMAIN ..."
-certbot certonly \
-  -v \
-  --server https://acme.sectigo.com/v2/DV \
-  --eab-kid "$EAB_KID" \
-  --eab-hmac-key "$EAB_HMAC" \
-  --email "$EMAIL" \
-  --agree-tos \
-  --non-interactive \
-  --webroot -w "$WEBROOT" \
-  -d "$DOMAIN" \
-  --debug-challenges \
-  --cert-name "$CERT_NAME" \
-  --config-dir "$CONFIG_DIR" \
-  --work-dir "$WORK_DIR" \
-  --logs-dir "$LOGS_DIR"
+
+if [ "$IS_WILDCARD" = true ]; then
+  if [ "$DNS_METHOD" = "manual" ]; then
+    certbot certonly \
+      -v \
+      --server https://acme.sectigo.com/v2/DV \
+      --eab-kid "$EAB_KID" \
+      --eab-hmac-key "$EAB_HMAC" \
+      --email "$EMAIL" \
+      --agree-tos \
+      --manual \
+      --preferred-challenges dns \
+      -d "$DOMAIN" \
+      --debug-challenges \
+      --cert-name "$CERT_NAME" \
+      --config-dir "$CONFIG_DIR" \
+      --work-dir "$WORK_DIR" \
+      --logs-dir "$LOGS_DIR"
+  elif [ "$DNS_METHOD" = "cloudflare" ]; then
+    certbot certonly \
+      -v \
+      --server https://acme.sectigo.com/v2/DV \
+      --eab-kid "$EAB_KID" \
+      --eab-hmac-key "$EAB_HMAC" \
+      --email "$EMAIL" \
+      --agree-tos \
+      --non-interactive \
+      --dns-cloudflare \
+      --dns-cloudflare-credentials "$CF_CRED_FILE" \
+      -d "$DOMAIN" \
+      --debug-challenges \
+      --cert-name "$CERT_NAME" \
+      --config-dir "$CONFIG_DIR" \
+      --work-dir "$WORK_DIR" \
+      --logs-dir "$LOGS_DIR"
+  fi
+else
+  certbot certonly \
+    -v \
+    --server https://acme.sectigo.com/v2/DV \
+    --eab-kid "$EAB_KID" \
+    --eab-hmac-key "$EAB_HMAC" \
+    --email "$EMAIL" \
+    --agree-tos \
+    --non-interactive \
+    --webroot -w "$WEBROOT" \
+    -d "$DOMAIN" \
+    --debug-challenges \
+    --cert-name "$CERT_NAME" \
+    --config-dir "$CONFIG_DIR" \
+    --work-dir "$WORK_DIR" \
+    --logs-dir "$LOGS_DIR"
+fi
 
 if [ $? -ne 0 ]; then
   echo "Certificate issuance failed."
