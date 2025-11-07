@@ -10,9 +10,43 @@ echo "1. Renew SSL certificates automatically"
 echo "2. Install renewed certificates to web server"
 echo ""
 
+# === PARSE ARGUMENTS ===
+NON_INTERACTIVE=false
+SECTIGO_DIR_ARG=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --non-interactive)
+      NON_INTERACTIVE=true
+      shift
+      ;;
+    --sectigo-dir)
+      SECTIGO_DIR_ARG="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
 # === INPUT ===
-read -p "Enter Sectigo working directory [default: /opt/sectigo]: " SECTIGO_DIR
-[ -z "$SECTIGO_DIR" ] && SECTIGO_DIR="/opt/sectigo"
+if [ "$NON_INTERACTIVE" = true ]; then
+  SECTIGO_DIR="${SECTIGO_DIR_ARG:-/opt/sectigo}"
+else
+  read -p "Enter Sectigo working directory [default: /opt/sectigo]: " SECTIGO_DIR
+  [ -z "$SECTIGO_DIR" ] && SECTIGO_DIR="/opt/sectigo"
+fi
+
+# === SETUP LOGGING ===
+LOG_FILE="/var/log/sectigo-renewal.log"
+exec > >(tee -a "$LOG_FILE")
+exec 2>&1
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting renewal process"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # === CHECK IF DIRECTORY EXISTS ===
 if [ ! -d "$SECTIGO_DIR" ]; then
@@ -90,20 +124,41 @@ for DIR in $DOMAIN_DIRS; do
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "📜 Certificate: $CERT_NAME"
     echo "🌐 Domain: $DOMAIN"
+    echo "📅 Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
+    # Check certificate expiry
+    CERT_FILE="$CONFIG_DIR/live/$CERT_NAME/cert.pem"
+    if [ -f "$CERT_FILE" ]; then
+      EXPIRY=$(openssl x509 -enddate -noout -in "$CERT_FILE" 2>/dev/null | cut -d= -f2)
+      EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null || echo "0")
+      NOW_EPOCH=$(date +%s)
+      DAYS_LEFT=$(( ($EXPIRY_EPOCH - $NOW_EPOCH) / 86400 ))
+      echo "📊 Days until expiry: $DAYS_LEFT days"
+      echo "📆 Expires on: $EXPIRY"
+    fi
+    
     # Attempt renewal
+    echo "🔄 Attempting renewal..."
     certbot renew \
       --cert-name "$CERT_NAME" \
       --config-dir "$CONFIG_DIR" \
       --work-dir "$WORK_DIR" \
       --logs-dir "$LOGS_DIR" \
-      --deploy-hook "echo 'Certificate renewed: $CERT_NAME'" \
-      --quiet
+      --deploy-hook "echo '[$(date '+%Y-%m-%d %H:%M:%S')] Certificate renewed: $CERT_NAME'"
     
-    if [ $? -eq 0 ]; then
-      echo "✅ Successfully renewed: $CERT_NAME"
+    RENEWAL_RESULT=$?
+    
+    if [ $RENEWAL_RESULT -eq 0 ]; then
+      echo "✅ Successfully renewed: $CERT_NAME at $(date '+%Y-%m-%d %H:%M:%S')"
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+      
+      # Verify new certificate
+      CERT_FILE="$CONFIG_DIR/live/$CERT_NAME/cert.pem"
+      if [ -f "$CERT_FILE" ]; then
+        NEW_EXPIRY=$(openssl x509 -enddate -noout -in "$CERT_FILE" 2>/dev/null | cut -d= -f2)
+        echo "✨ New expiry date: $NEW_EXPIRY"
+      fi
       
       # Install to web server if applicable
       if [ "$WEB_SERVER" != "none" ]; then
@@ -118,9 +173,9 @@ for DIR in $DOMAIN_DIRS; do
             if [ -f "$NGINX_CONF" ]; then
               # Check if certificate paths are already configured
               if grep -q "ssl_certificate.*$CERT_DIR" "$NGINX_CONF"; then
-                echo "   Certificate paths already configured in Nginx"
+                echo "   ✅ Certificate paths already configured in Nginx"
               else
-                echo "   Certificate installed, manual configuration may be needed"
+                echo "   ⚠️  Certificate installed, manual configuration may be needed"
               fi
             fi
           elif [ "$WEB_SERVER" = "apache" ]; then
@@ -128,17 +183,18 @@ for DIR in $DOMAIN_DIRS; do
             if [ -f "$APACHE_CONF" ]; then
               # Check if certificate paths are already configured
               if grep -q "SSLCertificateFile.*$CERT_DIR" "$APACHE_CONF"; then
-                echo "   Certificate paths already configured in Apache"
+                echo "   ✅ Certificate paths already configured in Apache"
               else
-                echo "   Certificate installed, manual configuration may be needed"
+                echo "   ⚠️  Certificate installed, manual configuration may be needed"
               fi
             fi
           fi
         fi
       fi
     else
-      echo "❌ Failed to renew: $CERT_NAME"
-      FAILED_DOMAINS="$FAILED_DOMAINS\n  - $CERT_NAME ($DOMAIN)"
+      echo "❌ Failed to renew: $CERT_NAME at $(date '+%Y-%m-%d %H:%M:%S')"
+      echo "❌ Exit code: $RENEWAL_RESULT"
+      FAILED_DOMAINS="$FAILED_DOMAINS\n  - $CERT_NAME ($DOMAIN) - Failed at $(date '+%Y-%m-%d %H:%M:%S')"
     fi
     echo ""
   done
@@ -147,7 +203,7 @@ done
 # === RELOAD WEB SERVER ===
 if [ "$WEB_SERVER" != "none" ] && [ $SUCCESS_COUNT -gt 0 ]; then
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "🔄 Reloading $WEB_SERVER to apply changes..."
+  echo "🔄 Reloading $WEB_SERVER to apply changes at $(date '+%Y-%m-%d %H:%M:%S')..."
   
   if [ "$WEB_SERVER" = "nginx" ]; then
     nginx -t && systemctl reload nginx
@@ -155,10 +211,11 @@ if [ "$WEB_SERVER" != "none" ] && [ $SUCCESS_COUNT -gt 0 ]; then
     apache2ctl configtest && systemctl reload apache2
   fi
   
-  if [ $? -eq 0 ]; then
-    echo "✅ $WEB_SERVER reloaded successfully"
+  RELOAD_RESULT=$?
+  if [ $RELOAD_RESULT -eq 0 ]; then
+    echo "✅ $WEB_SERVER reloaded successfully at $(date '+%Y-%m-%d %H:%M:%S')"
   else
-    echo "❌ Failed to reload $WEB_SERVER - please check configuration"
+    echo "❌ Failed to reload $WEB_SERVER - please check configuration (Exit code: $RELOAD_RESULT)"
   fi
 fi
 
@@ -167,19 +224,22 @@ echo ""
 echo "=============================================="
 echo "           Renewal Summary                    "
 echo "=============================================="
-echo "Total certificates processed: $RENEWAL_COUNT"
-echo "Successfully renewed: $SUCCESS_COUNT"
-echo "Failed: $((RENEWAL_COUNT - SUCCESS_COUNT))"
+echo "⏰ Completed at: $(date '+%Y-%m-%d %H:%M:%S')"
+echo "📊 Total certificates processed: $RENEWAL_COUNT"
+echo "✅ Successfully renewed: $SUCCESS_COUNT"
+echo "❌ Failed: $((RENEWAL_COUNT - SUCCESS_COUNT))"
 
 if [ -n "$FAILED_DOMAINS" ]; then
   echo ""
-  echo "Failed domains:"
+  echo "❌ Failed domains:"
   echo -e "$FAILED_DOMAINS"
 fi
 
 echo ""
-echo "✅ Renewal process completed"
+echo "✅ Renewal process completed at $(date '+%Y-%m-%d %H:%M:%S')"
+echo "📝 Log file: $LOG_FILE"
 echo "=============================================="
+echo ""
 
 # === EXIT ===
 exit 0
