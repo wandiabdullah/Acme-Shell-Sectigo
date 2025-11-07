@@ -42,6 +42,8 @@ read -p "Enter Sectigo working directory [default: /opt/sectigo]: " SECTIGO_DIR
 
 # === CHECK FOR WILDCARD DOMAIN ===
 IS_WILDCARD=false
+INCLUDE_WWW=false
+
 if [[ "$DOMAIN" == \** ]]; then
   IS_WILDCARD=true
   echo "Wildcard domain detected. DNS validation will be used."
@@ -64,6 +66,16 @@ if [[ "$DOMAIN" == \** ]]; then
     CF_CRED_FILE="$CONFIG_DIR/cloudflare.ini"
     echo "dns_cloudflare_api_token = $CF_API_TOKEN" > "$CF_CRED_FILE"
     chmod 600 "$CF_CRED_FILE"
+  fi
+else
+  # For non-wildcard domains, ask about www subdomain
+  read -p "Include www.$DOMAIN in certificate (SAN)? (y/n) [default: y]: " INCLUDE_WWW_INPUT
+  INCLUDE_WWW_INPUT="${INCLUDE_WWW_INPUT:-y}"
+  if [[ "$INCLUDE_WWW_INPUT" =~ ^[Yy]$ ]]; then
+    INCLUDE_WWW=true
+    echo "Certificate will include: $DOMAIN and www.$DOMAIN"
+  else
+    echo "Certificate will only include: $DOMAIN"
   fi
 fi
 
@@ -116,10 +128,18 @@ fi
 # === CREATE VHOST PORT 80 BEFORE CERTBOT ===
 if [ "$WEB_SERVER" = "nginx" ]; then
   NGINX_CONF="/etc/nginx/sites-available/$DOMAIN.conf"
+  
+  # Build server_name line
+  if [ "$INCLUDE_WWW" = true ]; then
+    SERVER_NAME_LINE="server_name $DOMAIN www.$DOMAIN;"
+  else
+    SERVER_NAME_LINE="server_name $DOMAIN;"
+  fi
+  
   cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
-    server_name $DOMAIN;
+    $SERVER_NAME_LINE
 
     root $WEBROOT;
     index index.php index.html index.htm;
@@ -139,9 +159,18 @@ EOF
 
 elif [ "$WEB_SERVER" = "apache" ]; then
   APACHE_CONF="/etc/apache2/sites-available/$DOMAIN.conf"
+  
+  # Build ServerAlias line for www
+  if [ "$INCLUDE_WWW" = true ]; then
+    SERVER_ALIAS_LINE="    ServerAlias www.$DOMAIN"
+  else
+    SERVER_ALIAS_LINE=""
+  fi
+  
   cat > "$APACHE_CONF" <<EOF
 <VirtualHost *:80>
     ServerName $DOMAIN
+$SERVER_ALIAS_LINE
     DocumentRoot $WEBROOT
 
     <Directory $WEBROOT>
@@ -161,6 +190,13 @@ fi
 # === REQUEST CERTIFICATE ===
 echo "Requesting SSL certificate for $DOMAIN ..."
 
+# Build domain arguments for certbot
+DOMAIN_ARGS="-d $DOMAIN"
+if [ "$INCLUDE_WWW" = true ]; then
+  DOMAIN_ARGS="$DOMAIN_ARGS -d www.$DOMAIN"
+  echo "Including SAN: www.$DOMAIN"
+fi
+
 if [ "$IS_WILDCARD" = true ]; then
   if [ "$DNS_METHOD" = "manual" ]; then
     certbot certonly \
@@ -172,7 +208,7 @@ if [ "$IS_WILDCARD" = true ]; then
       --agree-tos \
       --manual \
       --preferred-challenges dns \
-      -d "$DOMAIN" \
+      $DOMAIN_ARGS \
       --debug-challenges \
       --cert-name "$CERT_NAME" \
       --config-dir "$CONFIG_DIR" \
@@ -189,7 +225,7 @@ if [ "$IS_WILDCARD" = true ]; then
       --non-interactive \
       --dns-cloudflare \
       --dns-cloudflare-credentials "$CF_CRED_FILE" \
-      -d "$DOMAIN" \
+      $DOMAIN_ARGS \
       --debug-challenges \
       --cert-name "$CERT_NAME" \
       --config-dir "$CONFIG_DIR" \
@@ -206,7 +242,7 @@ else
     --agree-tos \
     --non-interactive \
     --webroot -w "$WEBROOT" \
-    -d "$DOMAIN" \
+    $DOMAIN_ARGS \
     --debug-challenges \
     --cert-name "$CERT_NAME" \
     --config-dir "$CONFIG_DIR" \
@@ -225,7 +261,7 @@ if [ "$WEB_SERVER" = "nginx" ]; then
 
 server {
     listen 443 ssl;
-    server_name $DOMAIN;
+    $SERVER_NAME_LINE
 
     ssl_certificate     $CERT_DIR/fullchain.pem;
     ssl_certificate_key $CERT_DIR/privkey.pem;
@@ -270,6 +306,7 @@ elif [ "$WEB_SERVER" = "apache" ]; then
 
 <VirtualHost *:443>
     ServerName $DOMAIN
+$SERVER_ALIAS_LINE
     DocumentRoot $WEBROOT
 
     SSLEngine on
