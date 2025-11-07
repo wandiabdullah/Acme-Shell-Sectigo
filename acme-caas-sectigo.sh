@@ -9,6 +9,28 @@ echo "This script will issue an SSL certificate using:"
 echo "Sectigo CAAS ACME endpoint with EAB credentials"
 echo ""
 
+# === SELECT CERTIFICATE TYPE ===
+echo "Select certificate validation type:"
+echo "1) DV (Domain Validation)"
+echo "2) OV (Organization Validation)"
+read -p "Enter your choice (1 or 2): " CERT_TYPE_CHOICE
+
+while [[ "$CERT_TYPE_CHOICE" != "1" && "$CERT_TYPE_CHOICE" != "2" ]]; do
+  echo "Invalid choice. Please enter 1 for DV or 2 for OV."
+  read -p "Enter your choice (1 or 2): " CERT_TYPE_CHOICE
+done
+
+if [ "$CERT_TYPE_CHOICE" = "1" ]; then
+  CERT_TYPE="DV"
+  ACME_SERVER="https://acme.sectigo.com/v2/DV"
+  echo "Selected: Domain Validation (DV)"
+else
+  CERT_TYPE="OV"
+  ACME_SERVER="https://acme.sectigo.com/v2/OV"
+  echo "Selected: Organization Validation (OV)"
+fi
+echo ""
+
 # === INPUT ===
 read -p "Enter your EAB KID                        : " EAB_KID
 read -p "Enter your EAB HMAC key                   : " EAB_HMAC
@@ -143,7 +165,7 @@ if [ "$IS_WILDCARD" = true ]; then
   if [ "$DNS_METHOD" = "manual" ]; then
     certbot certonly \
       -v \
-      --server https://acme.sectigo.com/v2/DV \
+      --server "$ACME_SERVER" \
       --eab-kid "$EAB_KID" \
       --eab-hmac-key "$EAB_HMAC" \
       --email "$EMAIL" \
@@ -159,7 +181,7 @@ if [ "$IS_WILDCARD" = true ]; then
   elif [ "$DNS_METHOD" = "cloudflare" ]; then
     certbot certonly \
       -v \
-      --server https://acme.sectigo.com/v2/DV \
+      --server "$ACME_SERVER" \
       --eab-kid "$EAB_KID" \
       --eab-hmac-key "$EAB_HMAC" \
       --email "$EMAIL" \
@@ -177,7 +199,7 @@ if [ "$IS_WILDCARD" = true ]; then
 else
   certbot certonly \
     -v \
-    --server https://acme.sectigo.com/v2/DV \
+    --server "$ACME_SERVER" \
     --eab-kid "$EAB_KID" \
     --eab-hmac-key "$EAB_HMAC" \
     --email "$EMAIL" \
